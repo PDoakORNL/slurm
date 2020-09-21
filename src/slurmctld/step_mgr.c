@@ -968,6 +968,7 @@ static bitstr_t *_pick_step_nodes(job_record_t *job_ptr,
 	int error_code, nodes_picked_cnt = 0, cpus_picked_cnt = 0;
 	int cpu_cnt, i, task_cnt, max_rem_nodes;
 	int mem_blocked_nodes = 0, mem_blocked_cpus = 0;
+	int job_blocked_cpus = 0;
 	ListIterator step_iterator;
 	step_record_t *step_ptr;
 	job_resources_t *job_resrcs_ptr = job_ptr->job_resrcs;
@@ -1110,8 +1111,10 @@ static bitstr_t *_pick_step_nodes(job_record_t *job_ptr,
 	/*
 	 * Exclusive mode:
 	 * Do not use nodes with insufficient CPUs, memory or GRES.
+	 * FIXME: We most likely don't need this as it makes it so functionality
+	 * does work.  Revisit!!!!
 	 */
-	if (step_spec->flags & SSF_EXCLUSIVE) {
+	if (0 && step_spec->flags & SSF_EXCLUSIVE) {
 		int avail_cpus, avail_tasks, total_cpus, total_tasks, node_inx;
 		uint64_t avail_mem, total_mem;
 		uint32_t nodes_picked_cnt = 0;
@@ -1346,6 +1349,15 @@ static bitstr_t *_pick_step_nodes(job_record_t *job_ptr,
 				continue;	/* node now DOWN */
 
 			total_cpus = job_resrcs_ptr->cpus[node_inx];
+
+			if (step_spec->flags & SSF_EXCLUSIVE) {
+				total_cpus -= job_resrcs_ptr->
+					cpus_used[node_inx];
+			}
+
+			if (!total_cpus)
+				continue;
+
 			usable_cpu_cnt[i] = avail_cpus = total_cpus;
 			if (_is_mem_resv() &&
 			    step_spec->pn_min_memory & MEM_PER_CPU) {
@@ -1354,6 +1366,9 @@ static bitstr_t *_pick_step_nodes(job_record_t *job_ptr,
 				/* ignore current step allocations */
 				tmp_mem    = job_resrcs_ptr->
 					     memory_allocated[node_inx];
+				if (step_spec->flags & SSF_EXCLUSIVE)
+					tmp_mem -= job_resrcs_ptr->
+						memory_used[node_inx];
 				tmp_cpus   = tmp_mem / mem_use;
 				total_cpus = MIN(total_cpus, tmp_cpus);
 				/* consider current step allocations */
@@ -1370,6 +1385,9 @@ static bitstr_t *_pick_step_nodes(job_record_t *job_ptr,
 				/* ignore current step allocations */
 				tmp_mem    = job_resrcs_ptr->
 					     memory_allocated[node_inx];
+				if (step_spec->flags & SSF_EXCLUSIVE)
+					tmp_mem -= job_resrcs_ptr->
+						memory_used[node_inx];
 				if (tmp_mem < mem_use)
 					total_cpus = 0;
 				/* consider current step allocations */
@@ -1631,8 +1649,17 @@ static bitstr_t *_pick_step_nodes(job_record_t *job_ptr,
 				if (!bit_test(job_resrcs_ptr->node_bitmap, i))
 					continue;
 				node_inx++;
-				usable_cpu_cnt[i] = job_resrcs_ptr->
-						    cpus[node_inx];
+				usable_cpu_cnt[i] =
+					job_resrcs_ptr->cpus[node_inx];
+
+				if (step_spec->flags & SSF_EXCLUSIVE) {
+					job_blocked_cpus +=
+						job_resrcs_ptr->
+						cpus_used[node_inx];
+					usable_cpu_cnt[i] -=
+						job_resrcs_ptr->
+						cpus_used[node_inx];
+				}
 			}
 
 		}
@@ -1765,7 +1792,8 @@ static bitstr_t *_pick_step_nodes(job_record_t *job_ptr,
 		if (step_spec->cpu_count > cpus_picked_cnt) {
 			if (step_spec->cpu_count &&
 			    (step_spec->cpu_count <=
-			     (cpus_picked_cnt + mem_blocked_cpus))) {
+			     (cpus_picked_cnt + mem_blocked_cpus +
+			      job_blocked_cpus))) {
 				*return_code = ESLURM_NODES_BUSY;
 			} else if (!bit_super_set(job_ptr->node_bitmap,
 						  up_node_bitmap)) {
@@ -3064,6 +3092,10 @@ extern slurm_step_layout_t *step_layout_create(step_record_t *step_ptr,
 				usable_cpus = cpus - cpus_used;
 			} else
 				usable_cpus = cpus;
+
+			if (usable_cpus <= 0)
+				continue;
+
 			if ((step_ptr->pn_min_memory & MEM_PER_CPU) &&
 			    _is_mem_resv()) {
 				uint64_t mem_use = step_ptr->pn_min_memory;
